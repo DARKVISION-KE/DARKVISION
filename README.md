@@ -3,58 +3,58 @@ DARKVISION
 Security Solutions
 Call / WhatsApp: 0796601992
 
-CCTV Packages Available
+# CCTV Packages Available
 
-HIKVISION
+# HIKVISION
 
-DAHUA
+# DAHUA
 
-Popular Packages
+# Popular Packages
 
-2 Camera Package
+# 2 Camera Package
 HD / IP System
 1080P / 4MP
 
-Remote Viewing
+# Remote Viewing
 
-Mobile Access
+# Mobile Access
 Price: KSh 45,000 Installed
-4 Camera Package
-HD / IP System
+# 4 Camera Package
+# HD / IP System
 1080P / 4MP
 
-Remote Viewing
+# Remote Viewing
 Mobile Access
 
-Price: KSh 85,000 Installed
+# Price: KSh 85,000 Installed
 
-8 Camera Package
+# 8 Camera Package
 HD / IP System
 1080P / 4MP / 4K
 
-Remote Viewing
+# Remote Viewing
 Mobile Access
 
-Price: KSh 155,000 Installed
+# Price: KSh 155,000 Installed
 Our Services
 
-Sales
+# Sales
 
-Installation
+# Installation
 
-Maintenance
+# Maintenance
 
-Upgrades
+# Upgrades
 
 # Why Choose DarkVision
 
-Professional Installation
+# Professional Installation
 
-Trusted Brands
+# Trusted Brands
 
-Clear Night Vision
+# Clear Night Vision
 
-Fast Support
+# Fast Support
 # © 2026 DarkVision Security Solutions
 
 # Call / WhatsApp: 0796601992
