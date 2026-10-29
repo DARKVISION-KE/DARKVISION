@@ -1,0 +1,242 @@
+//@version=5
+strategy("XAUUSD Supply-Demand + AMD + Profile Context", overlay=true, pyramiding=0, initial_capital=10000, currency=currency.USD, process_orders_on_close=true, calc_on_every_tick=false)
+
+// This strategy is designed for a 5-minute XAUUSD chart.
+// dPOC/dVAH/dVAL are approximations based on chart-feed volume assigned to hlc3 bins.
+
+// CONFIG
+string TF_ENTRY = "5"
+string TF_AMD = "15"
+string TF_H1 = "60"
+string TF_H4 = "240"
+int EMA_FAST = 20
+int EMA_MID = 50
+int EMA_SLOW = 200
+int RSI_LEN = 14
+int ATR_LEN = 14
+int PIVOT_LEFT = 3
+int PIVOT_RIGHT = 3
+int AMD_RANGE_BARS = 8
+int PROFILE_MAX_BINS = 500
+
+float RISK_PERCENT = input.float(1.0, "Risk per trade (%)", minval=0.1, maxval=5.0, step=0.1)
+float CONTRACT_OZ_PER_LOT = input.float(100.0, "Ounces per standard lot", minval=1.0)
+float MIN_LOT = input.float(0.01, "Minimum lot", minval=0.01, step=0.01)
+float LOT_STEP = input.float(0.01, "Lot step", minval=0.01, step=0.01)
+float PROFILE_BIN_SIZE = input.float(0.50, "Approx. profile bin size ($)", minval=0.05, step=0.05)
+float VALUE_AREA_PERCENT = input.float(70.0, "Value area volume (%)", minval=50.0, maxval=90.0, step=1.0)
+float STOP_ATR_BUFFER = input.float(0.20, "Stop buffer (ATR)", minval=0.0, step=0.05)
+float STOP_SPREAD_BUFFER = input.float(0.20, "Spread buffer (price units)", minval=0.0, step=0.01)
+float DISPLACEMENT_ATR = input.float(0.60, "5M displacement body (ATR)", minval=0.1, step=0.1)
+float ZONE_TOLERANCE_ATR = input.float(0.25, "Zone touch tolerance (ATR)", minval=0.0, step=0.05)
+bool SHOW_PROFILE = input.bool(true, "Plot approximate prior-day profile")
+bool SHOW_ZONES = input.bool(true, "Plot active 1H supply/demand zones")
+
+roundDownToStep(float value, float step) =>
+    step > 0 ? math.floor(value / step) * step : value
+
+fmt(float value) =>
+    na(value) ? "n/a" : str.tostring(value, format.mintick)
+
+f_zoneValues() =>
+    float ph = ta.pivothigh(high, PIVOT_LEFT, PIVOT_RIGHT)
+    float pl = ta.pivotlow(low, PIVOT_LEFT, PIVOT_RIGHT)
+    float supplyTop = ta.valuewhen(not na(ph), high[PIVOT_RIGHT], 0)
+    float supplyBottom = ta.valuewhen(not na(ph), math.max(open[PIVOT_RIGHT], close[PIVOT_RIGHT]), 0)
+    float demandTop = ta.valuewhen(not na(pl), math.min(open[PIVOT_RIGHT], close[PIVOT_RIGHT]), 0)
+    float demandBottom = ta.valuewhen(not na(pl), low[PIVOT_RIGHT], 0)
+    [supplyTop[1], supplyBottom[1], demandTop[1], demandBottom[1]]
+
+f_amdWindows() =>
+    float rangeHigh = ta.highest(high[1], AMD_RANGE_BARS)
+    float rangeLow = ta.lowest(low[1], AMD_RANGE_BARS)
+    float atr15 = ta.atr(ATR_LEN)
+    float atrBase = ta.sma(atr15, 20)
+    bool compressed = not na(atrBase) and atr15 < atrBase
+    bool sweptLow = compressed and low < rangeLow and close > rangeLow
+    bool sweptHigh = compressed and high > rangeHigh and close < rangeHigh
+    bool longWindow = ta.barssince(sweptLow) <= 3
+    bool shortWindow = ta.barssince(sweptHigh) <= 3
+    [longWindow[1], shortWindow[1]]
+
+if barstate.isfirst and timeframe.period != TF_ENTRY
+    runtime.error("Set the chart to 5 minutes before using this strategy.")
+
+float atr = ta.atr(ATR_LEN)
+float rsi = ta.rsi(close, RSI_LEN)
+float body = math.abs(close - open)
+float pivotHigh = ta.pivothigh(high, PIVOT_LEFT, PIVOT_RIGHT)
+float pivotLow = ta.pivotlow(low, PIVOT_LEFT, PIVOT_RIGHT)
+float lastSwingHigh = ta.valuewhen(not na(pivotHigh), pivotHigh, 0)
+float lastSwingLow = ta.valuewhen(not na(pivotLow), pivotLow, 0)
+
+// Confirmed HTF bars only: offset expressions by one bar and use lookahead_on.
+float h1Close = request.security(syminfo.tickerid, TF_H1, close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+float h1Fast = request.security(syminfo.tickerid, TF_H1, ta.ema(close, EMA_FAST)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+float h1Mid = request.security(syminfo.tickerid, TF_H1, ta.ema(close, EMA_MID)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+float h4Close = request.security(syminfo.tickerid, TF_H4, close[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+float h4Fast = request.security(syminfo.tickerid, TF_H4, ta.ema(close, EMA_FAST)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+float h4Mid = request.security(syminfo.tickerid, TF_H4, ta.ema(close, EMA_MID)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+float h4Slow = request.security(syminfo.tickerid, TF_H4, ta.ema(close, EMA_SLOW)[1], gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+bool h1Bull = h1Close > h1Fast and h1Fast > h1Mid
+bool h1Bear = h1Close < h1Fast and h1Fast < h1Mid
+bool h4Bull = h4Close > h4Fast and h4Fast > h4Mid and h4Mid > h4Slow
+bool h4Bear = h4Close < h4Fast and h4Fast < h4Mid and h4Mid < h4Slow
+
+[h1SupplyTop, h1SupplyBottom, h1DemandTop, h1DemandBottom] = request.security(syminfo.tickerid, TF_H1, f_zoneValues(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+[h4SupplyTop, h4SupplyBottom, h4DemandTop, h4DemandBottom] = request.security(syminfo.tickerid, TF_H4, f_zoneValues(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+
+bool h1DemandTouch = not na(h1DemandTop) and low <= h1DemandTop + atr * ZONE_TOLERANCE_ATR and high >= h1DemandBottom - atr * ZONE_TOLERANCE_ATR
+bool h4DemandTouch = not na(h4DemandTop) and low <= h4DemandTop + atr * ZONE_TOLERANCE_ATR and high >= h4DemandBottom - atr * ZONE_TOLERANCE_ATR
+bool h1SupplyTouch = not na(h1SupplyTop) and high >= h1SupplyBottom - atr * ZONE_TOLERANCE_ATR and low <= h1SupplyTop + atr * ZONE_TOLERANCE_ATR
+bool h4SupplyTouch = not na(h4SupplyTop) and high >= h4SupplyBottom - atr * ZONE_TOLERANCE_ATR and low <= h4SupplyTop + atr * ZONE_TOLERANCE_ATR
+
+// Approximate prior-day profile. Each candle's entire volume is assigned to its hlc3 bin.
+var map<int, float> todayProfile = map.new<int, float>()
+var float prevPOC = na
+var float prevVAH = na
+var float prevVAL = na
+int thisBin = int(math.floor(hlc3 / PROFILE_BIN_SIZE))
+
+if timeframe.change("D")
+    int nKeys = map.size(todayProfile)
+    if nKeys > 0
+        array<int> keys = map.keys(todayProfile)
+        int minBin = array.get(keys, 0)
+        int maxBin = minBin
+        float totalVol = 0.0
+        float pocVol = -1.0
+        int pocBin = minBin
+        for i = 0 to nKeys - 1
+            int k = array.get(keys, i)
+            float v = nz(map.get(todayProfile, k), 0.0)
+            minBin := math.min(minBin, k)
+            maxBin := math.max(maxBin, k)
+            totalVol += v
+            if v > pocVol
+                pocVol := v
+                pocBin := k
+        int binSpan = maxBin - minBin
+        if binSpan <= PROFILE_MAX_BINS and totalVol > 0
+            int loBin = pocBin
+            int hiBin = pocBin
+            float valueVol = nz(map.get(todayProfile, pocBin), 0.0)
+            float targetVol = totalVol * VALUE_AREA_PERCENT / 100.0
+            int loops = 0
+            while valueVol < targetVol and loops < PROFILE_MAX_BINS and (loBin > minBin or hiBin < maxBin)
+                float belowVol = loBin > minBin ? nz(map.get(todayProfile, loBin - 1), 0.0) : -1.0
+                float aboveVol = hiBin < maxBin ? nz(map.get(todayProfile, hiBin + 1), 0.0) : -1.0
+                if aboveVol > belowVol
+                    hiBin += 1
+                    valueVol += math.max(aboveVol, 0.0)
+                else
+                    loBin -= 1
+                    valueVol += math.max(belowVol, 0.0)
+                loops += 1
+            prevPOC := (pocBin + 0.5) * PROFILE_BIN_SIZE
+            prevVAH := (hiBin + 1.0) * PROFILE_BIN_SIZE
+            prevVAL := loBin * PROFILE_BIN_SIZE
+        else
+            prevPOC := na
+            prevVAH := na
+            prevVAL := na
+    map.clear(todayProfile)
+
+float binVolume = nz(map.get(todayProfile, thisBin), 0.0)
+map.put(todayProfile, thisBin, binVolume + nz(volume, 0.0))
+
+float profileTolerance = atr * 0.50
+bool longProfileContext = (not na(prevVAL) and low <= prevVAL + profileTolerance and close > prevVAL) or (not na(prevPOC) and math.abs(close - prevPOC) <= profileTolerance)
+bool shortProfileContext = (not na(prevVAH) and high >= prevVAH - profileTolerance and close < prevVAH) or (not na(prevPOC) and math.abs(close - prevPOC) <= profileTolerance)
+
+[amdLongWindow, amdShortWindow] = request.security(syminfo.tickerid, TF_AMD, f_amdWindows(), gaps=barmerge.gaps_off, lookahead=barmerge.lookahead_on)
+bool fiveMinuteBullShift = not na(lastSwingHigh) and close > lastSwingHigh and close > open and body >= atr * DISPLACEMENT_ATR
+bool fiveMinuteBearShift = not na(lastSwingLow) and close < lastSwingLow and close < open and body >= atr * DISPLACEMENT_ATR
+bool longMomentum = rsi > 50
+bool shortMomentum = rsi < 50
+
+bool longSetup = barstate.isconfirmed and h4Bull and h1Bull and (h1DemandTouch or h4DemandTouch) and amdLongWindow and fiveMinuteBullShift and longMomentum and longProfileContext
+bool shortSetup = barstate.isconfirmed and h4Bear and h1Bear and (h1SupplyTouch or h4SupplyTouch) and amdShortWindow and fiveMinuteBearShift and shortMomentum and shortProfileContext
+int longScore = (h4Bull ? 1 : 0) + (h1Bull ? 1 : 0) + ((h1DemandTouch or h4DemandTouch) ? 1 : 0) + (amdLongWindow ? 1 : 0) + (fiveMinuteBullShift ? 1 : 0) + (longMomentum ? 1 : 0) + (longProfileContext ? 1 : 0)
+int shortScore = (h4Bear ? 1 : 0) + (h1Bear ? 1 : 0) + ((h1SupplyTouch or h4SupplyTouch) ? 1 : 0) + (amdShortWindow ? 1 : 0) + (fiveMinuteBearShift ? 1 : 0) + (shortMomentum ? 1 : 0) + (shortProfileContext ? 1 : 0)
+
+float entry = close
+float stopBuffer = atr * STOP_ATR_BUFFER + STOP_SPREAD_BUFFER
+float longStop = not na(lastSwingLow) ? lastSwingLow - stopBuffer : entry - atr * 1.5 - stopBuffer
+float shortStop = not na(lastSwingHigh) ? lastSwingHigh + stopBuffer : entry + atr * 1.5 + stopBuffer
+float longRisk = entry - longStop
+float shortRisk = shortStop - entry
+float riskCash = strategy.equity * RISK_PERCENT / 100.0
+float longLotsRaw = longRisk > 0 ? riskCash / (longRisk * CONTRACT_OZ_PER_LOT) : na
+float shortLotsRaw = shortRisk > 0 ? riskCash / (shortRisk * CONTRACT_OZ_PER_LOT) : na
+float longLots = not na(longLotsRaw) ? roundDownToStep(longLotsRaw, LOT_STEP) : na
+float shortLots = not na(shortLotsRaw) ? roundDownToStep(shortLotsRaw, LOT_STEP) : na
+bool enterLong = longSetup and strategy.position_size == 0 and not na(longLots) and longLots >= MIN_LOT and longStop < entry
+bool enterShort = shortSetup and strategy.position_size == 0 and not na(shortLots) and shortLots >= MIN_LOT and shortStop > entry
+
+var float activeEntry = na
+var float activeStop = na
+var float activeTP1 = na
+var float activeTP2 = na
+var float activeTP3 = na
+var float activeLots = na
+var int activeScore = 0
+
+if enterLong
+    activeEntry := entry
+    activeStop := longStop
+    activeTP1 := entry + 1.5 * longRisk
+    activeTP2 := entry + 2.0 * longRisk
+    activeTP3 := entry + 3.0 * longRisk
+    activeLots := longLots
+    activeScore := longScore
+    strategy.entry("Long", strategy.long, qty=longLots * CONTRACT_OZ_PER_LOT)
+    strategy.exit("Long TP1", "Long", stop=activeStop, limit=activeTP1, qty_percent=50)
+    strategy.exit("Long TP2", "Long", stop=activeStop, limit=activeTP2, qty_percent=30)
+    strategy.exit("Long TP3", "Long", stop=activeStop, limit=activeTP3, qty_percent=20)
+    alert("XAUUSD LONG | Entry " + fmt(activeEntry) + " | SL " + fmt(activeStop) + " | TP1 " + fmt(activeTP1) + " | TP2 " + fmt(activeTP2) + " | TP3 " + fmt(activeTP3) + " | Est. lots " + str.tostring(activeLots, "#.##") + " | Score " + str.tostring(activeScore) + "/7", alert.freq_once_per_bar_close)
+
+if enterShort
+    activeEntry := entry
+    activeStop := shortStop
+    activeTP1 := entry - 1.5 * shortRisk
+    activeTP2 := entry - 2.0 * shortRisk
+    activeTP3 := entry - 3.0 * shortRisk
+    activeLots := shortLots
+    activeScore := shortScore
+    strategy.entry("Short", strategy.short, qty=shortLots * CONTRACT_OZ_PER_LOT)
+    strategy.exit("Short TP1", "Short", stop=activeStop, limit=activeTP1, qty_percent=50)
+    strategy.exit("Short TP2", "Short", stop=activeStop, limit=activeTP2, qty_percent=30)
+    strategy.exit("Short TP3", "Short", stop=activeStop, limit=activeTP3, qty_percent=20)
+    alert("XAUUSD SHORT | Entry " + fmt(activeEntry) + " | SL " + fmt(activeStop) + " | TP1 " + fmt(activeTP1) + " | TP2 " + fmt(activeTP2) + " | TP3 " + fmt(activeTP3) + " | Est. lots " + str.tostring(activeLots, "#.##") + " | Score " + str.tostring(activeScore) + "/7", alert.freq_once_per_bar_close)
+
+plot(SHOW_PROFILE ? prevPOC : na, "Approx. prior-day dPOC", color=color.yellow, linewidth=2, style=plot.style_linebr)
+plot(SHOW_PROFILE ? prevVAH : na, "Approx. prior-day dVAH", color=color.orange, style=plot.style_linebr)
+plot(SHOW_PROFILE ? prevVAL : na, "Approx. prior-day dVAL", color=color.orange, style=plot.style_linebr)
+plot(SHOW_ZONES ? h1SupplyTop : na, "1H Supply Top", color=color.new(color.red, 20), style=plot.style_linebr)
+plot(SHOW_ZONES ? h1SupplyBottom : na, "1H Supply Bottom", color=color.new(color.red, 45), style=plot.style_linebr)
+plot(SHOW_ZONES ? h1DemandTop : na, "1H Demand Top", color=color.new(color.lime, 20), style=plot.style_linebr)
+plot(SHOW_ZONES ? h1DemandBottom : na, "1H Demand Bottom", color=color.new(color.lime, 45), style=plot.style_linebr)
+plotshape(enterLong, "Long", shape.labelup, location.belowbar, color.green, text="LONG", textcolor=color.white, size=size.tiny)
+plotshape(enterShort, "Short", shape.labeldown, location.abovebar, color.red, text="SHORT", textcolor=color.white, size=size.tiny)
+
+var table panel = table.new(position.top_right, 2, 7, border_width=1)
+if barstate.islast
+    string state = enterLong ? "LONG" : enterShort ? "SHORT" : strategy.position_size != 0 ? "IN TRADE" : "NO TRADE"
+    int score = enterLong ? longScore : enterShort ? shortScore : math.max(longScore, shortScore)
+    string reason = enterLong ? "Long conditions met" : enterShort ? "Short conditions met" : not h4Bull and not h4Bear ? "4H bias not aligned" : not h1Bull and not h1Bear ? "1H bias not aligned" : not (h1DemandTouch or h4DemandTouch or h1SupplyTouch or h4SupplyTouch) ? "No HTF zone touch" : not (amdLongWindow or amdShortWindow) ? "No recent 15M sweep" : not (fiveMinuteBullShift or fiveMinuteBearShift) ? "Waiting for 5M shift" : "Profile/momentum filters incomplete"
+    table.cell(panel, 0, 0, "XAUUSD AMD", bgcolor=color.black, text_color=color.white)
+    table.cell(panel, 1, 0, state, bgcolor=enterLong ? color.green : enterShort ? color.red : color.gray, text_color=color.white)
+    table.cell(panel, 0, 1, "Reason")
+    table.cell(panel, 1, 1, reason)
+    table.cell(panel, 0, 2, "Confluence")
+    table.cell(panel, 1, 2, str.tostring(score) + "/7")
+    table.cell(panel, 0, 3, "Entry / SL")
+    table.cell(panel, 1, 3, fmt(activeEntry) + " / " + fmt(activeStop))
+    table.cell(panel, 0, 4, "TP1 / TP2")
+    table.cell(panel, 1, 4, fmt(activeTP1) + " / " + fmt(activeTP2))
+    table.cell(panel, 0, 5, "TP3 / est. lots")
+    table.cell(panel, 1, 5, fmt(activeTP3) + " / " + (na(activeLots) ? "n/a" : str.tostring(activeLots, "#.##")))
+    table.cell(panel, 0, 6, "dPOC / VAH / VAL")
+    table.cell(panel, 1, 6, fmt(prevPOC) + " / " + fmt(prevVAH) + " / " + fmt(prevVAL))
+
